@@ -4676,7 +4676,11 @@ export function createPrinter(printerOptions: PrinterOptions = {}, handlers: Pri
         }
 
         if (format & ListFormat.BracketsMask) {
-            writePunctuation(getOpeningBracket(format));
+            const openingBracket = getOpeningBracket(format);
+            if (!isUndefined) {
+                emitPos(children.pos - openingBracket.length);
+            }
+            writePunctuation(openingBracket);
             if (isEmpty && children) {
                 emitTrailingCommentsOfPosition(children.pos, /*prefixSpace*/ true); // Emit comments within empty bracketed lists
             }
