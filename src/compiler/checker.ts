@@ -2151,6 +2151,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
     var silentNeverSignature = createSignature(/*declaration*/ undefined, /*typeParameters*/ undefined, /*thisParameter*/ undefined, emptyArray, silentNeverType, /*resolvedTypePredicate*/ undefined, 0, SignatureFlags.None);
 
     var enumNumberIndexInfo = createIndexInfo(numberType, stringType, /*isReadonly*/ true);
+    var anyBaseTypeIndexInfo = createIndexInfo(stringType, anyType, /*isReadonly*/ false);
 
     var iterationTypesCache = new Map<string, IterationTypes>(); // cache for common IterationTypes instances
     var noIterationTypes: IterationTypes = {
@@ -13454,7 +13455,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                 addInheritedMembers(members, getPropertiesOfType(instantiatedBaseType));
                 callSignatures = concatenate(callSignatures, getSignaturesOfType(instantiatedBaseType, SignatureKind.Call));
                 constructSignatures = concatenate(constructSignatures, getSignaturesOfType(instantiatedBaseType, SignatureKind.Construct));
-                const inheritedIndexInfos = instantiatedBaseType !== anyType ? getIndexInfosOfType(instantiatedBaseType) : [createIndexInfo(stringType, anyType, /*isReadonly*/ false)];
+                const inheritedIndexInfos = instantiatedBaseType !== anyType ? getIndexInfosOfType(instantiatedBaseType) : [anyBaseTypeIndexInfo];
                 indexInfos = concatenate(indexInfos, filter(inheritedIndexInfos, info => !findIndexInfo(indexInfos, info.keyType)));
             }
         }
@@ -13986,7 +13987,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                 addInheritedMembers(members, getPropertiesOfType(baseConstructorType));
             }
             else if (baseConstructorType === anyType) {
-                baseConstructorIndexInfo = createIndexInfo(stringType, anyType, /*isReadonly*/ false);
+                baseConstructorIndexInfo = anyBaseTypeIndexInfo;
             }
         }
 
@@ -30018,7 +30019,13 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
             // #38720/60122, allow null as jsxFragmentFactory
             let jsxFactorySym: Symbol | undefined;
             if (!(isJsxOpeningFragment(node) && jsxFactoryNamespace === "null")) {
-                jsxFactorySym = resolveName(jsxFactoryLocation, jsxFactoryNamespace, compilerOptions.jsx === JsxEmit.Preserve ? SymbolFlags.Value & ~SymbolFlags.Enum : SymbolFlags.Value, jsxFactoryRefErr, /*isUse*/ true);
+                jsxFactorySym = resolveName(
+                    jsxFactoryLocation,
+                    jsxFactoryNamespace,
+                    (compilerOptions.jsx === JsxEmit.Preserve || compilerOptions.jsx === JsxEmit.ReactNative) ? SymbolFlags.Value & ~SymbolFlags.Enum : SymbolFlags.Value,
+                    jsxFactoryRefErr,
+                    /*isUse*/ true,
+                );
             }
 
             if (jsxFactorySym) {
@@ -30035,9 +30042,16 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
             // if JsxFragment, additionally mark jsx pragma as referenced, since `getJsxNamespace` above would have resolved to only the fragment factory if they are distinct
             if (isJsxOpeningFragment(node)) {
                 const file = getSourceFileOfNode(node);
-                const localJsxNamespace = getLocalJsxNamespace(file);
-                if (localJsxNamespace) {
-                    resolveName(jsxFactoryLocation, localJsxNamespace, compilerOptions.jsx === JsxEmit.Preserve ? SymbolFlags.Value & ~SymbolFlags.Enum : SymbolFlags.Value, jsxFactoryRefErr, /*isUse*/ true);
+                const entity = getJsxFactoryEntity(file);
+                if (entity) {
+                    const localJsxNamespace = getFirstIdentifier(entity).escapedText;
+                    resolveName(
+                        jsxFactoryLocation,
+                        localJsxNamespace,
+                        (compilerOptions.jsx === JsxEmit.Preserve || compilerOptions.jsx === JsxEmit.ReactNative) ? SymbolFlags.Value & ~SymbolFlags.Enum : SymbolFlags.Value,
+                        jsxFactoryRefErr,
+                        /*isUse*/ true,
+                    );
                 }
             }
         }
@@ -34453,6 +34467,13 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
     }
 
     function reportNonexistentProperty(propNode: Identifier | PrivateIdentifier, containingType: Type, isUncheckedJS: boolean) {
+        const links = getNodeLinks(propNode);
+        const cache = (links.nonExistentPropCheckCache ||= new Set());
+        const key = `${getTypeId(containingType)}|${isUncheckedJS}`;
+        if (cache.has(key)) {
+            return;
+        }
+        cache.add(key);
         let errorInfo: DiagnosticMessageChain | undefined;
         let relatedInfo: Diagnostic | undefined;
         if (!isPrivateIdentifier(propNode) && containingType.flags & TypeFlags.Union && !(containingType.flags & TypeFlags.Primitive)) {
@@ -36825,7 +36846,13 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
 
         const jsxFactoryRefErr = diagnostics ? Diagnostics.Using_JSX_fragments_requires_fragment_factory_0_to_be_in_scope_but_it_could_not_be_found : undefined;
         const jsxFactorySymbol = getJsxNamespaceContainerForImplicitImport(node) ??
-            resolveName(node, jsxFragmentFactoryName, compilerOptions.jsx === JsxEmit.Preserve ? SymbolFlags.Value & ~SymbolFlags.Enum : SymbolFlags.Value, /*nameNotFoundMessage*/ jsxFactoryRefErr, /*isUse*/ true);
+            resolveName(
+                node,
+                jsxFragmentFactoryName,
+                (compilerOptions.jsx === JsxEmit.Preserve || compilerOptions.jsx === JsxEmit.ReactNative) ? SymbolFlags.Value & ~SymbolFlags.Enum : SymbolFlags.Value,
+                /*nameNotFoundMessage*/ jsxFactoryRefErr,
+                /*isUse*/ true,
+            );
 
         if (jsxFactorySymbol === undefined) return sourceFileLinks.jsxFragmentType = errorType;
         if (jsxFactorySymbol.escapedName === ReactNames.Fragment) return sourceFileLinks.jsxFragmentType = getTypeOfSymbol(jsxFactorySymbol);
@@ -38664,7 +38691,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
             // A missing not-equal flag indicates that the type wasn't handled by some case.
             return !someType(operandConstraint, t => getTypeFacts(t, notEqualFacts) === notEqualFacts);
         }
-        const type = checkExpressionCached(node.expression);
+        const type = getBaseConstraintOrType(checkExpressionCached(node.expression));
         if (!isLiteralType(type)) {
             return false;
         }
@@ -39064,7 +39091,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                 expr.expression.kind === SyntaxKind.ThisKeyword
             ) {
                 // Look for if this is the constructor for the class that `symbol` is a property of.
-                const ctor = getContainingFunction(expr);
+                const ctor = getControlFlowContainer(expr);
                 if (!(ctor && (ctor.kind === SyntaxKind.Constructor || isJSConstructor(ctor)))) {
                     return true;
                 }
@@ -39909,6 +39936,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
         switch (node.kind) {
             case SyntaxKind.AwaitExpression:
             case SyntaxKind.CallExpression:
+            case SyntaxKind.TaggedTemplateExpression:
             case SyntaxKind.ElementAccessExpression:
             case SyntaxKind.MetaProperty:
             case SyntaxKind.NewExpression:
@@ -46746,6 +46774,15 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
     ): MemberOverrideStatus {
         const isJs = isInJSFile(node);
         const nodeInAmbientContext = !!(node.flags & NodeFlags.Ambient);
+        if (memberHasOverrideModifier && member?.valueDeclaration && isClassElement(member.valueDeclaration) && member.valueDeclaration.name && isNonBindableDynamicName(member.valueDeclaration.name)) {
+            error(
+                errorNode,
+                isJs ?
+                    Diagnostics.This_member_cannot_have_a_JSDoc_comment_with_an_override_tag_because_its_name_is_dynamic :
+                    Diagnostics.This_member_cannot_have_an_override_modifier_because_its_name_is_dynamic,
+            );
+            return MemberOverrideStatus.HasInvalidOverride;
+        }
         if (baseWithThis && (memberHasOverrideModifier || compilerOptions.noImplicitOverride)) {
             const thisType = memberIsStatic ? staticType : typeWithThis;
             const baseType = memberIsStatic ? baseStaticType : baseWithThis;
@@ -48081,7 +48118,8 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                     }
                 }
 
-                if (isOnlyImportableAsDefault(node.moduleSpecifier, resolvedModule) && !hasTypeJsonImportAttribute(node)) {
+                if (moduleKind === ModuleKind.NodeNext && isOnlyImportableAsDefault(node.moduleSpecifier, resolvedModule) && !hasTypeJsonImportAttribute(node)) {
+                    // Import attributes/assertions are not allowed in --module node16, so don't suggest adding one
                     error(node.moduleSpecifier, Diagnostics.Importing_a_JSON_file_into_an_ECMAScript_module_requires_a_type_Colon_json_import_attribute_when_module_is_set_to_0, ModuleKind[moduleKind]);
                 }
             }
@@ -50761,6 +50799,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                     result ||= [];
                     for (const info of infoList!) {
                         if (info.declaration) continue;
+                        if (info === anyBaseTypeIndexInfo) continue; // inherited, but looks like a late-bound signature because it has no declarations
                         const node = nodeBuilder.indexInfoToIndexSignatureDeclaration(info, enclosing, flags, internalFlags, tracker);
                         if (node && infoList === staticInfos) {
                             (((node as Mutable<typeof node>).modifiers ||= factory.createNodeArray()) as MutableNodeArray<Modifier>).unshift(factory.createModifier(SyntaxKind.StaticKeyword));
